@@ -1,105 +1,62 @@
 #!/usr/bin/env python3
 """
-Standalone chatbot script using the Cerebras API.
-
-It reads the entire stdin as the user's prompt, sends it to the Cerebras
-chat endpoint, and prints the model's response to stdout.
-
-The script exits with a non‑zero status if:
-- CEREBRAS_API_KEY is missing
-- No input is provided
-- The HTTP request fails or returns a non‑200 status
-- The response payload is malformed
+A minimal chatbot script that uses the Cerebras chat completion API.
+It sends a fixed user prompt to the model and prints the model's reply.
+No interactive input is required; the API key is read from the environment.
 """
 
-import json
 import os
 import sys
-from typing import Any, Dict
-
-try:
-    import requests
-except ImportError as e:
-    print("ERROR: Required package 'requests' is not installed.", file=sys.stderr)
-    raise e
-
+import json
+import requests
 
 API_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions"
 MODEL_NAME = "gpt-oss-120b"
 
 
 def get_api_key() -> str:
-    """
-    Retrieve the Cerebras API key from the environment.
-    Exit with an error if it is not set.
-    """
-    api_key = os.getenv("CEREBRAS_API_KEY")
-    if not api_key:
-        print(
-            "ERROR: Environment variable CEREBRAS_API_KEY is not set.",
-            file=sys.stderr,
-        )
+    """Retrieve the Cerebras API key from the environment."""
+    key = os.environ.get("CEREBRAS_API_KEY")
+    if not key:
+        print("Error: environment variable CEREBRAS_API_KEY is not set.", file=sys.stderr)
         sys.exit(1)
-    return api_key
+    return key
 
 
-def read_prompt() -> str:
-    """
-    Read the entire stdin as a single prompt string.
-    Exit with an error if stdin is empty.
-    """
-    prompt = sys.stdin.read()
-    if not prompt.strip():
-        print("ERROR: No input provided to the chatbot.", file=sys.stderr)
-        sys.exit(1)
-    return prompt.strip()
-
-
-def build_payload(prompt: str) -> Dict[str, Any]:
-    """
-    Construct the JSON payload expected by the Cerebras chat API.
-    """
+def build_payload(prompt: str) -> dict:
+    """Create the JSON payload for the chat completion request."""
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt},
+    ]
     return {
         "model": MODEL_NAME,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        # Optional parameters – adjust as needed
-        "max_tokens": 512,
-        "temperature": 0.7,
+        "messages": messages,
+        # Optional parameters can be added here, e.g., temperature, max_tokens
     }
 
 
-def call_cerebras_api(api_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Send a POST request to the Cerebras chat endpoint.
-    Returns the parsed JSON response on success.
-    Exits with an error on network failure or non‑200 status.
-    """
+def call_cerebras_api(key: str, payload: dict) -> dict:
+    """Send the request to the Cerebras API and return the parsed JSON response."""
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
 
     try:
-        response = requests.post(
-            API_ENDPOINT,
-            headers=headers,
-            json=payload,
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        print(f"ERROR: Network request failed: {exc}", file=sys.stderr)
+        response = requests.post(API_ENDPOINT, headers=headers, json=payload, timeout=30)
+    except requests.exceptions.RequestException as exc:
+        print(f"Network error while contacting Cerebras API: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    if not response.ok:
-        # Attempt to include any error details returned by the API
+    if response.status_code != 200:
+        # Try to include any error message returned by the API
         try:
-            error_detail = response.json()
+            err_detail = response.json()
         except Exception:
-            error_detail = response.text
+            err_detail = response.text
         print(
-            f"ERROR: API request failed with status {response.status_code}: {error_detail}",
+            f"API request failed with status {response.status_code}: {err_detail}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -107,36 +64,27 @@ def call_cerebras_api(api_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return response.json()
     except json.JSONDecodeError as exc:
-        print(f"ERROR: Failed to parse JSON response: {exc}", file=sys.stderr)
+        print(f"Failed to parse JSON response: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
-def extract_reply(api_response: Dict[str, Any]) -> str:
-    """
-    Extract the assistant's reply from the API response.
-    Exits with an error if the expected fields are missing.
-    """
+def extract_reply(api_response: dict) -> str:
+    """Extract the assistant's reply from the API response."""
     try:
-        # According to the OpenAI‑compatible schema:
-        # {"choices": [{"message": {"role": "assistant", "content": "..."}}, ...]}
-        choice = api_response["choices"][0]
-        message = choice["message"]
-        content = message["content"]
-        return content.strip()
+        # OpenAI-compatible format: response["choices"][0]["message"]["content"]
+        return api_response["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as exc:
-        print(
-            f"ERROR: Unexpected API response format: missing field {exc}",
-            file=sys.stderr,
-        )
+        print(f"Unexpected API response structure: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
 def main() -> None:
+    # Fixed prompt – replace or extend as needed
+    user_prompt = "Hello, who are you?"
     api_key = get_api_key()
-    user_prompt = read_prompt()
     payload = build_payload(user_prompt)
-    response_json = call_cerebras_api(api_key, payload)
-    reply = extract_reply(response_json)
+    api_response = call_cerebras_api(api_key, payload)
+    reply = extract_reply(api_response)
     print(reply)
 
 
