@@ -1,96 +1,93 @@
 #!/usr/bin/env python3
 """
-A minimal chatbot that forwards a user prompt to the Cerebras chat API
-and prints the assistant's response.
+Cerebras Chatbot Script
 
-Usage (non‑interactive):
-    python chatbot.py "Your prompt here"
+This script sends a single user message to the Cerebras chat completion API
+and prints the assistant's reply.
 
-The script reads the Cerebras API key from the environment variable
-CEREBRAS_API_KEY. If the key is missing or the request fails, the script
-exits with a non‑zero status and prints the real error.
+Usage:
+    python3 chatbot.py "Your message here"
+
+The script requires the environment variable CEREBRAS_API_KEY to be set.
 """
 
-import argparse
-import json
 import os
 import sys
-
+import json
 import requests
 
-
+# Constants for the Cerebras API
 API_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions"
 MODEL_NAME = "gpt-oss-120b"
 
 
-def build_payload(prompt: str) -> dict:
-    """Create the JSON payload expected by the Cerebras API."""
+def get_api_key() -> str:
+    """Retrieve the Cerebras API key from the environment."""
+    api_key = os.environ.get("CEREBRAS_API_KEY")
+    if not api_key:
+        print("Error: CEREBRAS_API_KEY environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+    return api_key
+
+
+def build_payload(user_message: str) -> dict:
+    """Construct the JSON payload for the API request."""
     return {
         "model": MODEL_NAME,
         "messages": [
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": "You are a helpful AI assistant."},
+            {"role": "user", "content": user_message}
         ]
     }
 
 
-def call_cerebras_api(api_key: str, payload: dict) -> str:
-    """
-    Send the request to Cerebras and return the assistant's reply.
-
-    Raises:
-        RuntimeError: If the response is malformed or missing expected fields.
-    """
+def call_cerebras_api(api_key: str, payload: dict) -> dict:
+    """Make the POST request to the Cerebras chat completion endpoint."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
 
     response = requests.post(API_ENDPOINT, headers=headers, json=payload, timeout=30)
-    # Raise an HTTPError for bad status codes (4xx/5xx)
-    response.raise_for_status()
 
-    data = response.json()
+    if response.status_code != 200:
+        # Try to provide useful error details from the response body
+        try:
+            error_info = response.json()
+            print(f"Error: API returned status {response.status_code}: {error_info}", file=sys.stderr)
+        except Exception:
+            print(f"Error: API returned status {response.status_code}: {response.text}", file=sys.stderr)
+        sys.exit(1)
 
-    # Expected structure: {"choices": [{"message": {"content": "..."}}, ...], ...}
     try:
-        return data["choices"][0]["message"]["content"]
+        return response.json()
+    except json.JSONDecodeError as e:
+        print(f"Error: Failed to decode JSON response: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def extract_reply(api_response: dict) -> str:
+    """Extract the assistant's reply from the API response."""
+    try:
+        # The structure follows OpenAI's schema: choices[0].message.content
+        return api_response["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Unexpected API response format: {e}\nFull response: {json.dumps(data, indent=2)}") from e
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Simple Cerebras chatbot (non‑interactive)."
-    )
-    parser.add_argument(
-        "prompt",
-        nargs="+",
-        help="Prompt text to send to the chatbot. If multiple words are provided, they are joined with spaces."
-    )
-    args = parser.parse_args()
-
-    prompt_text = " ".join(args.prompt).strip()
-    if not prompt_text:
-        print("Error: Prompt is empty.", file=sys.stderr)
+        print(f"Error: Unexpected response structure: {e}", file=sys.stderr)
         sys.exit(1)
 
-    api_key = os.environ.get("CEREBRAS_API_KEY")
-    if not api_key:
-        print("Error: Environment variable CEREBRAS_API_KEY is not set.", file=sys.stderr)
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python3 chatbot.py \"Your message here\"", file=sys.stderr)
         sys.exit(1)
 
-    payload = build_payload(prompt_text)
+    user_message = sys.argv[1]
+    api_key = get_api_key()
+    payload = build_payload(user_message)
+    api_response = call_cerebras_api(api_key, payload)
+    reply = extract_reply(api_response)
 
-    try:
-        answer = call_cerebras_api(api_key, payload)
-    except requests.exceptions.RequestException as req_err:
-        print(f"Network or HTTP error while contacting Cerebras API: {req_err}", file=sys.stderr)
-        sys.exit(1)
-    except RuntimeError as rt_err:
-        print(f"Error processing API response: {rt_err}", file=sys.stderr)
-        sys.exit(1)
-
-    print(answer)
+    print(reply)
 
 
 if __name__ == "__main__":
