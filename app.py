@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-A minimal chatbot that uses the Cerebras API.
+Standalone chatbot script using the Cerebras API.
 
-It reads the user's prompt from the environment variable ``CHAT_PROMPT`` (default
-provided) and the API key from ``CEREBRAS_API_KEY``. The script performs a single
-POST request to the Cerebras chat completion endpoint and prints the assistant's
-reply to stdout.
+It reads the entire stdin as the user's prompt, sends it to the Cerebras
+chat endpoint, and prints the model's response to stdout.
 
-The script is fully self‑contained and exits with a non‑zero status on any
-error, exposing the real problem (missing key, network failure, bad response,
-etc.).
+The script exits with a non‑zero status if:
+- CEREBRAS_API_KEY is missing
+- No input is provided
+- The HTTP request fails or returns a non‑200 status
+- The response payload is malformed
 """
 
 import json
@@ -17,86 +17,128 @@ import os
 import sys
 from typing import Any, Dict
 
-import requests
+try:
+    import requests
+except ImportError as e:
+    print("ERROR: Required package 'requests' is not installed.", file=sys.stderr)
+    raise e
 
-# ----------------------------------------------------------------------
-# Configuration (do not modify unless you know what you are doing)
-# ----------------------------------------------------------------------
+
 API_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions"
 MODEL_NAME = "gpt-oss-120b"
 
-def fatal(msg: str, exit_code: int = 1) -> None:
-    """Print an error message to stderr and exit."""
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(exit_code)
 
 def get_api_key() -> str:
-    """Retrieve the Cerebras API key from the environment."""
-    key = os.environ.get("CEREBRAS_API_KEY")
-    if not key:
-        fatal("Environment variable CEREBRAS_API_KEY is not set.")
-    return key.strip()
-
-def get_prompt() -> str:
-    """Retrieve the user prompt from the environment (or use a default)."""
-    return os.environ.get("CHAT_PROMPT", "Hello, how are you?").strip()
-
-def call_cerebras_chat(api_key: str, prompt: str) -> str:
     """
-    Send a chat request to the Cerebras API and return the assistant's answer.
+    Retrieve the Cerebras API key from the environment.
+    Exit with an error if it is not set.
+    """
+    api_key = os.getenv("CEREBRAS_API_KEY")
+    if not api_key:
+        print(
+            "ERROR: Environment variable CEREBRAS_API_KEY is not set.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return api_key
 
-    Raises:
-        RuntimeError: on non‑200 HTTP status or malformed response.
+
+def read_prompt() -> str:
+    """
+    Read the entire stdin as a single prompt string.
+    Exit with an error if stdin is empty.
+    """
+    prompt = sys.stdin.read()
+    if not prompt.strip():
+        print("ERROR: No input provided to the chatbot.", file=sys.stderr)
+        sys.exit(1)
+    return prompt.strip()
+
+
+def build_payload(prompt: str) -> Dict[str, Any]:
+    """
+    Construct the JSON payload expected by the Cerebras chat API.
+    """
+    return {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        # Optional parameters – adjust as needed
+        "max_tokens": 512,
+        "temperature": 0.7,
+    }
+
+
+def call_cerebras_api(api_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Send a POST request to the Cerebras chat endpoint.
+    Returns the parsed JSON response on success.
+    Exits with an error on network failure or non‑200 status.
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    payload: Dict[str, Any] = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-    }
-
     try:
-        response = requests.post(API_ENDPOINT, headers=headers, json=payload, timeout=30)
-    except requests.exceptions.RequestException as exc:
-        fatal(f"Network request failed: {exc}")
-
-    if response.status_code != 200:
-        # Try to surface any error details returned by the API.
-        try:
-            err_data = response.json()
-            err_msg = err_data.get("error", response.text)
-        except Exception:
-            err_msg = response.text
-        fatal(
-            f"API returned error {response.status_code}: {err_msg}",
-            exit_code=response.status_code,
+        response = requests.post(
+            API_ENDPOINT,
+            headers=headers,
+            json=payload,
+            timeout=30,
         )
+    except requests.RequestException as exc:
+        print(f"ERROR: Network request failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not response.ok:
+        # Attempt to include any error details returned by the API
+        try:
+            error_detail = response.json()
+        except Exception:
+            error_detail = response.text
+        print(
+            f"ERROR: API request failed with status {response.status_code}: {error_detail}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     try:
-        data = response.json()
+        return response.json()
     except json.JSONDecodeError as exc:
-        fatal(f"Failed to decode JSON response: {exc}")
+        print(f"ERROR: Failed to parse JSON response: {exc}", file=sys.stderr)
+        sys.exit(1)
 
-    # Expected structure: {"choices": [{"message": {"content": "..."}}, ...], ...}
+
+def extract_reply(api_response: Dict[str, Any]) -> str:
+    """
+    Extract the assistant's reply from the API response.
+    Exits with an error if the expected fields are missing.
+    """
     try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        fatal(f"Unexpected response format: {exc}\nResponse body: {data}")
+        # According to the OpenAI‑compatible schema:
+        # {"choices": [{"message": {"role": "assistant", "content": "..."}}, ...]}
+        choice = api_response["choices"][0]
+        message = choice["message"]
+        content = message["content"]
+        return content.strip()
+    except (KeyError, IndexError) as exc:
+        print(
+            f"ERROR: Unexpected API response format: missing field {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    return content.strip()
 
 def main() -> None:
     api_key = get_api_key()
-    prompt = get_prompt()
+    user_prompt = read_prompt()
+    payload = build_payload(user_prompt)
+    response_json = call_cerebras_api(api_key, payload)
+    reply = extract_reply(response_json)
+    print(reply)
 
-    answer = call_cerebras_chat(api_key, prompt)
-
-    # Output the assistant's reply.
-    print(answer)
 
 if __name__ == "__main__":
     main()
