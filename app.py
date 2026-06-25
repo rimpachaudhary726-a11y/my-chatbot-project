@@ -1,107 +1,119 @@
 #!/usr/bin/env python3
 """
-Simple Cerebras chatbot script.
+A minimal Cerebras chatbot script.
 
-It sends a single user message to the Cerebras chat completion endpoint and prints
-the assistant's reply.
+It reads the prompt from command‑line arguments, sends it to the Cerebras
+Chat Completion API and prints the assistant's reply.
 
-The script is fully non‑interactive: all configuration is taken from environment
-variables.
-
-Required environment variables
-------------------------------
-CEREBRAS_API_KEY : your Cerebras API key (required)
-CEREBRAS_PROMPT : the user message to send (optional, defaults to a greeting)
-
-If CEREBRAS_API_KEY is missing the script exits with a clear error message.
+The script exits with a non‑zero status on any error, including a missing
+CEREBRAS_API_KEY environment variable.
 """
 
-import os
 import sys
+import os
 import json
+import logging
+from typing import List
 
-try:
-    import requests
-except ImportError as exc:
-    sys.stderr.write("Missing required package 'requests'. Install it via pip.\n")
-    sys.exit(1)
+import requests
 
-
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
 API_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions"
 MODEL_NAME = "gpt-oss-120b"
 
+# --------------------------------------------------------------------------- #
+# Helper functions
+# --------------------------------------------------------------------------- #
+def fatal(message: str) -> None:
+    """Print an error message to stderr and exit with status 1."""
+    sys.stderr.write(f"ERROR: {message}\n")
+    sys.exit(1)
+
 
 def get_api_key() -> str:
-    """Retrieve the Cerebras API key from the environment."""
-    key = os.getenv("CEREBRAS_API_KEY")
+    """Fetch the Cerebras API key from the environment."""
+    key = os.environ.get("CEREBRAS_API_KEY")
     if not key:
-        sys.stderr.write("Error: CEREBRAS_API_KEY environment variable not set.\n")
-        sys.exit(1)
+        fatal("CEREBRAS_API_KEY environment variable not set")
     return key
 
 
-def build_payload(user_message: str) -> dict:
-    """Create the JSON payload expected by the Cerebras API."""
+def build_payload(prompt: str) -> dict:
+    """Create the JSON payload expected by the Cerebras chat endpoint."""
     return {
         "model": MODEL_NAME,
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": prompt},
         ],
-        "max_tokens": 512,
-        "temperature": 0.7,
     }
 
 
-def call_cerebras_api(api_key: str, payload: dict) -> dict:
-    """Send the request to Cerebras and return the parsed JSON response."""
+def call_cerebras_api(key: str, payload: dict) -> dict:
+    """POST the payload to the Cerebras API and return the parsed JSON response."""
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
 
     try:
         response = requests.post(API_ENDPOINT, headers=headers, json=payload, timeout=30)
     except requests.RequestException as exc:
-        sys.stderr.write(f"Network error while contacting Cerebras API: {exc}\n")
-        sys.exit(1)
+        fatal(f"Network error while contacting Cerebras API: {exc}")
 
-    if not response.ok:
-        # Attempt to include any error details returned by the API
+    if response.status_code != 200:
+        # Attempt to surface possible error details from the service.
         try:
             error_detail = response.json()
-        except Exception:
+        except json.JSONDecodeError:
             error_detail = response.text
-        sys.stderr.write(
-            f"API request failed with status {response.status_code}: {error_detail}\n"
+        fatal(
+            f"Cerebras API returned HTTP {response.status_code}: {error_detail}"
         )
-        sys.exit(1)
 
     try:
         return response.json()
     except json.JSONDecodeError as exc:
-        sys.stderr.write(f"Failed to decode JSON response: {exc}\n")
-        sys.exit(1)
+        fatal(f"Failed to decode JSON response from Cerebras API: {exc}")
 
 
 def extract_reply(api_response: dict) -> str:
-    """Extract the assistant's reply from the API response."""
+    """Extract the assistant's content from the Cerebras API response."""
     try:
-        return api_response["choices"][0]["message"]["content"]
-    except (KeyError, IndexError) as exc:
-        sys.stderr.write(f"Unexpected API response format: {exc}\n")
-        sys.stderr.write(f"Full response: {json.dumps(api_response, indent=2)}\n")
-        sys.exit(1)
+        choices: List[dict] = api_response["choices"]
+        if not choices:
+            fatal("Cerebras API response contains no choices")
+        # The API returns a list; we take the first entry.
+        message = choices[0]["message"]
+        content = message["content"]
+        return content.strip()
+    except (KeyError, TypeError) as exc:
+        fatal(f"Unexpected response structure from Cerebras API: {exc}")
 
 
 def main() -> None:
+    """Entry point."""
+    if len(sys.argv) < 2:
+        fatal(
+            "No prompt supplied. Provide the user prompt as command‑line arguments."
+        )
+
+    # Join all arguments to form the full prompt (preserves spaces).
+    prompt = " ".join(sys.argv[1:]).strip()
+    if not prompt:
+        fatal("Prompt is empty after stripping whitespace.")
+
     api_key = get_api_key()
-    user_message = os.getenv("CEREBRAS_PROMPT", "Hello! Who are you?")
-    payload = build_payload(user_message)
-    api_response = call_cerebras_api(api_key, payload)
-    reply = extract_reply(api_response)
+    payload = build_payload(prompt)
+    response_json = call_cerebras_api(api_key, payload)
+    reply = extract_reply(response_json)
+
     print(reply)
 
 
 if __name__ == "__main__":
+    # Optional: configure basic logging (useful for debugging in CI)
+    logging.basicConfig(level=logging.ERROR)
     main()
